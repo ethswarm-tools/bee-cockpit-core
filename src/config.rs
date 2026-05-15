@@ -1,14 +1,18 @@
-//! Config schema items needed by the data layer (`api`, `watch`,
-//! `fleet`). The full `Config` struct + `[ui]` / `[alerts]` /
-//! `[fleet]` / `[bee]` / `[notifications]` / `[durability]` /
-//! `[pubsub]` / `[metrics]` / `[economics]` section structs plus
-//! `KeyBindings` / `Styles` still live in `bee-tui` for now — they
-//! move into core in a follow-up phase. See `PLAN.md` for the full
-//! plan.
+//! Renderer-agnostic config schema, file-discovery helpers, and the
+//! generic [`load_raw`] loader. The data-shape half — section structs
+//! (`BeeConfig`, `AlertsConfig`, …), the top-level [`Config`] struct,
+//! and the loader — lives here. The pieces that depend on TUI-only
+//! types (`KeyBindings`, `Styles`, key/colour parsers) stay in
+//! `bee-tui`; that crate wraps core's `Config` with `TuiConfig`.
 
-use std::{env, path::PathBuf};
+use std::{
+    collections::HashSet,
+    env,
+    path::{Path, PathBuf},
+};
 
-use serde::Deserialize;
+use directories::ProjectDirs;
+use serde::{Deserialize, de::DeserializeOwned};
 
 /// One configured Bee node. Multiple may coexist; multi-node UX is
 /// targeted at v0.4 but the schema supports it from day one.
@@ -396,4 +400,457 @@ fn default_theme() -> String {
 
 fn default_refresh() -> String {
     "default".into()
+}
+
+/// Renderer-specific path prefixes. Each renderer (bee-tui, beegui)
+/// supplies its own so core's path helpers can stay renderer-agnostic
+/// while still resolving the right env-var override / platform
+/// config-dir / `~/.config/<app>/` triple.
+#[derive(Clone, Copy, Debug)]
+pub struct ConfigPaths {
+    /// Used as the project name in `ProjectDirs::from("com",
+    /// "ethswarm-tools", app_name)` and as the leaf folder under
+    /// `~/.config/<app_name>/` (the cross-platform fallback path).
+    pub app_name: &'static str,
+    /// Env var that overrides the config directory when set.
+    /// E.g. `"BEE_TUI_CONFIG"` for bee-tui.
+    pub config_env: &'static str,
+    /// Env var that overrides the data directory when set.
+    /// E.g. `"BEE_TUI_DATA"` for bee-tui.
+    pub data_env: &'static str,
+}
+
+/// Default node list when the user hasn't configured any: a single
+/// `local` profile pointing at `http://localhost:1633`.
+pub fn default_nodes() -> Vec<NodeConfig> {
+    vec![NodeConfig {
+        name: "local".to_string(),
+        url: "http://localhost:1633".to_string(),
+        token: None,
+        log_file: None,
+        log_command: None,
+        default: true,
+    }]
+}
+
+/// Prepend `http://` to a scheme-less URL so `localhost:1633` works
+/// as a positional argument.
+pub fn normalize_url(url: &str) -> String {
+    if url.starts_with("http://") || url.starts_with("https://") {
+        url.to_string()
+    } else {
+        format!("http://{url}")
+    }
+}
+
+/// Extract the host (no scheme, no port, no path) from a URL.
+/// Handles `[ipv6]:port` and `host:port` forms.
+pub fn host_of(url: &str) -> &str {
+    let no_scheme = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    let host_port = no_scheme.split(['/', '?', '#']).next().unwrap_or(no_scheme);
+    if let Some(rest) = host_port.strip_prefix('[') {
+        rest.split(']').next().unwrap_or(rest)
+    } else {
+        match host_port.rsplit_once(':') {
+            Some((h, p)) if !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) => h,
+            _ => host_port,
+        }
+    }
+}
+
+/// Derive a short node name from a URL. A multi-label domain
+/// (`bee-eu.example.com`) collapses to its first label (`bee-eu`);
+/// bare hosts (`localhost`) and IP literals are kept whole. Returns
+/// an empty string when no host can be parsed.
+pub fn node_name_from_url(url: &str) -> String {
+    let host = host_of(url);
+    if host.is_empty() {
+        return String::new();
+    }
+    let ip_like = host.chars().all(|c| c.is_ascii_digit() || c == '.');
+    if !ip_like && host.contains('.') {
+        host.split('.').next().unwrap_or(host).to_string()
+    } else {
+        host.to_string()
+    }
+}
+
+/// Build an ad-hoc node list from positional URL arguments
+/// (`bee-tui url1 url2 …`). The first URL is the default/active node;
+/// names are derived from each URL's host with `-2`, `-3`, … suffixes
+/// on collision and a `nodeN` fallback when no host parses.
+/// Scheme-less URLs are normalised to `http://`.
+pub fn nodes_from_urls(urls: &[String]) -> Vec<NodeConfig> {
+    let mut used: HashSet<String> = HashSet::new();
+    urls.iter()
+        .enumerate()
+        .map(|(i, raw)| {
+            let url = normalize_url(raw);
+            let derived = node_name_from_url(&url);
+            let base = if derived.is_empty() {
+                format!("node{}", i + 1)
+            } else {
+                derived
+            };
+            let mut name = base.clone();
+            let mut n = 2;
+            while !used.insert(name.clone()) {
+                name = format!("{base}-{n}");
+                n += 1;
+            }
+            NodeConfig {
+                name,
+                url,
+                token: None,
+                log_file: None,
+                log_command: None,
+                default: i == 0,
+            }
+        })
+        .collect()
+}
+
+/// Config file names recognised in a search directory, in precedence
+/// order. The first one present wins.
+pub const CONFIG_FILE_CANDIDATES: [(&str, config::FileFormat); 5] = [
+    ("config.json5", config::FileFormat::Json5),
+    ("config.json", config::FileFormat::Json),
+    ("config.yaml", config::FileFormat::Yaml),
+    ("config.toml", config::FileFormat::Toml),
+    ("config.ini", config::FileFormat::Ini),
+];
+
+/// Map a config file path to its [`config::FileFormat`] by extension.
+/// Returns `None` for an unrecognised or missing extension. Backs the
+/// `--config <file>` flag, which (unlike the directory search) has no
+/// fixed file name to key the format off.
+pub fn format_from_extension(path: &Path) -> Option<config::FileFormat> {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())?
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "toml" => Some(config::FileFormat::Toml),
+        "json5" => Some(config::FileFormat::Json5),
+        "json" => Some(config::FileFormat::Json),
+        "yaml" | "yml" => Some(config::FileFormat::Yaml),
+        "ini" => Some(config::FileFormat::Ini),
+        _ => None,
+    }
+}
+
+pub fn dedup_dirs(dirs: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut seen = HashSet::new();
+    dirs.into_iter()
+        .filter(|d| seen.insert(d.clone()))
+        .collect()
+}
+
+/// [`ProjectDirs`] for the calling renderer.
+pub fn project_directory(paths: &ConfigPaths) -> Option<ProjectDirs> {
+    ProjectDirs::from("com", "ethswarm-tools", paths.app_name)
+}
+
+/// Platform-native config directory: XDG on Linux, `Application
+/// Support` on macOS, Known Folders on Windows. Last-resort entry in
+/// [`config_search_dirs`].
+pub fn platform_config_dir(paths: &ConfigPaths) -> PathBuf {
+    if let Some(proj_dirs) = project_directory(paths) {
+        proj_dirs.config_local_dir().to_path_buf()
+    } else {
+        PathBuf::from(".").join(".config")
+    }
+}
+
+/// Ordered list of directories searched for a config file. The first
+/// directory that holds a recognised `config.*` file wins.
+/// `~/.config/<app_name>/` is searched on *every* platform so macOS
+/// and Windows devs don't have to hunt down the platform-native path.
+pub fn config_search_dirs(paths: &ConfigPaths) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Some(explicit) = env::var(paths.config_env).ok().map(PathBuf::from) {
+        dirs.push(explicit);
+    }
+    if let Some(base) = directories::BaseDirs::new() {
+        dirs.push(base.home_dir().join(".config").join(paths.app_name));
+    }
+    dirs.push(platform_config_dir(paths));
+    dedup_dirs(dirs)
+}
+
+/// The directory a config file was actually found in — the first
+/// entry of [`config_search_dirs`] that contains a recognised
+/// `config.*`. `None` when no config file exists anywhere on the
+/// search path.
+pub fn resolved_config_dir(paths: &ConfigPaths) -> Option<PathBuf> {
+    config_search_dirs(paths).into_iter().find(|dir| {
+        CONFIG_FILE_CANDIDATES
+            .iter()
+            .any(|(file, _)| dir.join(file).exists())
+    })
+}
+
+/// The config directory the renderer uses: the resolved one if a
+/// config file exists, otherwise the env-var override, otherwise the
+/// platform-native default.
+pub fn get_config_dir(paths: &ConfigPaths) -> PathBuf {
+    resolved_config_dir(paths)
+        .or_else(|| env::var(paths.config_env).ok().map(PathBuf::from))
+        .unwrap_or_else(|| platform_config_dir(paths))
+}
+
+/// Data directory: the env-var override if set, otherwise the
+/// platform-native data-local dir from [`ProjectDirs`], otherwise
+/// `./.data`.
+pub fn get_data_dir(paths: &ConfigPaths) -> PathBuf {
+    if let Some(s) = env::var(paths.data_env).ok().map(PathBuf::from) {
+        s
+    } else if let Some(proj_dirs) = project_directory(paths) {
+        proj_dirs.data_local_dir().to_path_buf()
+    } else {
+        PathBuf::from(".").join(".data")
+    }
+}
+
+/// Top-level config schema, renderer-agnostic. bee-tui wraps this with
+/// `TuiConfig` to add `keybindings` + `styles`; beegui will compose
+/// it similarly with whatever GUI-only settings it needs.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Config {
+    #[serde(default, flatten)]
+    pub config: AppConfig,
+    #[serde(default = "default_nodes")]
+    pub nodes: Vec<NodeConfig>,
+    /// `[ui]` section — theme + ascii-fallback knobs.
+    #[serde(default)]
+    pub ui: UiConfig,
+    /// `[bee]` section — when present, the renderer spawns the Bee
+    /// node itself before opening the cockpit. Absence keeps the
+    /// legacy behaviour of connecting to an already-running Bee.
+    #[serde(default)]
+    pub bee: Option<BeeConfig>,
+    /// `[metrics]` section — when present and `enabled = true`, the
+    /// renderer exposes a Prometheus `/metrics` endpoint on the
+    /// configured address. Default off because exposing an HTTP
+    /// listener should be an explicit operator opt-in.
+    #[serde(default)]
+    pub metrics: MetricsConfig,
+    /// `[economics]` section — optional cost-context oracles
+    /// (xBZZ → USD price + Gnosis chain gas). The `:price` verb works
+    /// without configuration (uses Swarm's public token service);
+    /// `:basefee` requires `gnosis_rpc_url` to be set.
+    #[serde(default)]
+    pub economics: EconomicsConfig,
+    /// `[alerts]` section — webhook ping when a health gate flips.
+    /// Disabled when `webhook_url` is absent (the default).
+    #[serde(default)]
+    pub alerts: AlertsConfig,
+    /// `[durability]` section — knobs for `:durability-check` and
+    /// `:watch-ref`.
+    #[serde(default)]
+    pub durability: DurabilityConfig,
+    /// `[pubsub]` section — optional history-file writer for the
+    /// S15 Pubsub watch live tail.
+    #[serde(default)]
+    pub pubsub: PubsubConfig,
+    /// `[fleet]` section — fleet-aggregate webhook.
+    #[serde(default)]
+    pub fleet: FleetConfig,
+    /// `[notifications]` section — in-cockpit notification center.
+    #[serde(default)]
+    pub notifications: NotificationsConfig,
+}
+
+impl Config {
+    /// Pick the active node profile: first entry with
+    /// `default = true`, otherwise the first entry, otherwise
+    /// [`None`].
+    pub fn active_node(&self) -> Option<&NodeConfig> {
+        self.nodes
+            .iter()
+            .find(|n| n.default)
+            .or_else(|| self.nodes.first())
+    }
+}
+
+/// Generic config loader. File discovery + env-var overrides +
+/// deserialization, parameterised over the renderer's concrete config
+/// type `T`. Renderers call this with `T = TuiConfig` /
+/// `T = GuiConfig`; core never has to know about renderer-only fields
+/// like `keybindings`/`styles`.
+///
+/// When `explicit_file` is `Some`, that exact file is loaded — it
+/// must exist and have a recognised extension, and the directory
+/// search is skipped entirely. This backs the `--config` CLI flag.
+/// When `None`, the standard search path is used and missing files
+/// silently fall through to `T::default()` for unspecified fields.
+pub fn load_raw<T>(
+    paths: &ConfigPaths,
+    explicit_file: Option<&Path>,
+) -> Result<T, config::ConfigError>
+where
+    T: DeserializeOwned + Default,
+{
+    let data_dir = get_data_dir(paths);
+    let config_dir = get_config_dir(paths);
+    let mut builder = config::Config::builder()
+        .set_default("data_dir", data_dir.to_str().unwrap())?
+        .set_default("config_dir", config_dir.to_str().unwrap())?;
+
+    if let Some(file) = explicit_file {
+        let format = format_from_extension(file).ok_or_else(|| {
+            config::ConfigError::Message(format!(
+                "unrecognised config file extension for {} — expected one of: \
+                 toml, json5, json, yaml, yml, ini",
+                file.display()
+            ))
+        })?;
+        if !file.exists() {
+            return Err(config::ConfigError::Message(format!(
+                "config file not found: {}",
+                file.display()
+            )));
+        }
+        builder = builder.add_source(
+            config::File::from(file.to_path_buf())
+                .format(format)
+                .required(true),
+        );
+    } else {
+        let search_dirs = config_search_dirs(paths);
+        let mut found_config = false;
+        'search: for dir in &search_dirs {
+            for (file, format) in &CONFIG_FILE_CANDIDATES {
+                let path = dir.join(file);
+                if path.exists() {
+                    builder = builder
+                        .add_source(config::File::from(path).format(*format).required(false));
+                    found_config = true;
+                    break 'search;
+                }
+            }
+        }
+        if !found_config {
+            tracing::error!(
+                "No configuration file found. Searched: {}. \
+                 Application may not behave as expected",
+                search_dirs
+                    .iter()
+                    .map(|d| d.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+    }
+
+    builder.build()?.try_deserialize()
+}
+
+#[cfg(test)]
+mod tests {
+    use pretty_assertions::assert_eq;
+
+    use super::*;
+
+    const TEST_PATHS: ConfigPaths = ConfigPaths {
+        app_name: "bee-cockpit-core-test",
+        config_env: "BEE_COCKPIT_CORE_TEST_CONFIG",
+        data_env: "BEE_COCKPIT_CORE_TEST_DATA",
+    };
+
+    #[test]
+    fn dedup_dirs_keeps_first_occurrence_in_order() {
+        let dirs = vec![
+            PathBuf::from("/a"),
+            PathBuf::from("/b"),
+            PathBuf::from("/a"),
+            PathBuf::from("/c"),
+            PathBuf::from("/b"),
+        ];
+        assert_eq!(
+            dedup_dirs(dirs),
+            vec![
+                PathBuf::from("/a"),
+                PathBuf::from("/b"),
+                PathBuf::from("/c"),
+            ]
+        );
+    }
+
+    #[test]
+    fn format_from_extension_maps_known_extensions() {
+        use config::FileFormat;
+        assert_eq!(
+            format_from_extension(Path::new("a/b/config.toml")),
+            Some(FileFormat::Toml)
+        );
+        assert_eq!(
+            format_from_extension(Path::new("nodes.JSON5")),
+            Some(FileFormat::Json5)
+        );
+        assert_eq!(
+            format_from_extension(Path::new("nodes.yml")),
+            Some(FileFormat::Yaml)
+        );
+        assert_eq!(
+            format_from_extension(Path::new("nodes.yaml")),
+            Some(FileFormat::Yaml)
+        );
+        assert_eq!(
+            format_from_extension(Path::new("nodes.ini")),
+            Some(FileFormat::Ini)
+        );
+        assert_eq!(format_from_extension(Path::new("nodes.conf")), None);
+        assert_eq!(format_from_extension(Path::new("nodes")), None);
+    }
+
+    #[test]
+    fn node_name_from_url_derives_short_names() {
+        assert_eq!(node_name_from_url("http://localhost:1633"), "localhost");
+        assert_eq!(
+            node_name_from_url("https://bee-eu.example.com:1633"),
+            "bee-eu"
+        );
+        assert_eq!(node_name_from_url("http://10.0.1.5:1633"), "10.0.1.5");
+        assert_eq!(node_name_from_url("http://[::1]:1633"), "::1");
+        assert_eq!(node_name_from_url("bee.example.org/"), "bee");
+    }
+
+    #[test]
+    fn nodes_from_urls_builds_adhoc_fleet() {
+        let nodes = nodes_from_urls(&[
+            "http://localhost:1633".to_string(),
+            "bee-eu.example.com:1633".to_string(),
+        ]);
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[0].name, "localhost");
+        assert_eq!(nodes[0].url, "http://localhost:1633");
+        assert!(nodes[0].default);
+        assert_eq!(nodes[1].name, "bee-eu");
+        assert_eq!(nodes[1].url, "http://bee-eu.example.com:1633");
+        assert!(!nodes[1].default);
+    }
+
+    #[test]
+    fn nodes_from_urls_disambiguates_colliding_names() {
+        let nodes = nodes_from_urls(&[
+            "http://bee.a.com:1633".to_string(),
+            "http://bee.b.com:1633".to_string(),
+            "http://bee.c.com:1633".to_string(),
+        ]);
+        assert_eq!(nodes[0].name, "bee");
+        assert_eq!(nodes[1].name, "bee-2");
+        assert_eq!(nodes[2].name, "bee-3");
+    }
+
+    #[test]
+    fn config_search_dirs_includes_dot_config_app_dir() {
+        let dirs = config_search_dirs(&TEST_PATHS);
+        let expected_suffix = format!(".config/{}", TEST_PATHS.app_name);
+        assert!(
+            dirs.iter().any(|d| d.ends_with(&expected_suffix)),
+            "expected ~/{expected_suffix} in search path, got {dirs:?}"
+        );
+    }
 }
