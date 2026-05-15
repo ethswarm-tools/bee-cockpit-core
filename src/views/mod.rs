@@ -12,9 +12,11 @@
 //! no `Color`.
 
 pub mod api_health;
+pub mod feed_timeline;
 pub mod fleet;
 pub mod health;
 pub mod manifest;
+pub mod pubsub;
 pub mod tags;
 pub mod warmup;
 pub mod watchlist;
