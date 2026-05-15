@@ -42,4 +42,10 @@ pub mod notifications;
 pub mod pubsub;
 pub mod stamps;
 pub mod uploads;
+
+// Phase 6 — per-screen views. Each `views::<name>` holds the pure
+// view-data half of bee-tui's `components/<name>.rs`; the renderer
+// half (ratatui Component impl) stays in bee-tui.
+pub mod views;
+
 pub mod watch;
