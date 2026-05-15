@@ -596,8 +596,7 @@ mod tests {
             make_tx("2026-05-08T11:59:00Z"),
             make_tx("2026-05-08T11:50:00Z"),
         ];
-        let now =
-            crate::views::api_health::parse_rfc3339_to_unix("2026-05-08T12:00:00Z").unwrap();
+        let now = crate::views::api_health::parse_rfc3339_to_unix("2026-05-08T12:00:00Z").unwrap();
         let tx_snap = TransactionsSnapshot {
             pending: txs,
             ..TransactionsSnapshot::default()

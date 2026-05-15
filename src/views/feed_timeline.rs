@@ -127,10 +127,7 @@ mod tests {
 
     #[test]
     fn row_view_reference_shortens_hex() {
-        let r = row_view(
-            &entry(2, Some(&"a".repeat(64)), None),
-            1_700_000_500,
-        );
+        let r = row_view(&entry(2, Some(&"a".repeat(64)), None), 1_700_000_500);
         assert!(!r.is_error);
         assert_eq!(r.kind, "ref");
         assert!(r.body.contains('…'));

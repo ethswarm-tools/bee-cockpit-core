@@ -8,7 +8,9 @@
 //! bee-scripts/bad-status.sh). The renderer owns the drill-pane
 //! fetch channels and the ratatui draw path.
 
-use bee::debug::{Balance, BinInfo, PeerCheques, PeerInfo, PeerStatus, Settlement, Status, Topology};
+use bee::debug::{
+    Balance, BinInfo, PeerCheques, PeerInfo, PeerStatus, Settlement, Status, Topology,
+};
 use num_bigint::BigInt;
 
 use crate::watch::TopologySnapshot;
