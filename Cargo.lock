@@ -73,6 +73,7 @@ dependencies = [
  "color-eyre",
  "directories",
  "futures",
+ "libc",
  "num-bigint",
  "pretty_assertions",
  "reqwest",

@@ -28,6 +28,10 @@ pub mod version_check;
 // config schema (KeyBindings, Styles, the section structs) follows
 // in a later phase.
 pub mod api;
+pub mod bee_log;
+pub mod bee_log_tailer;
+pub mod bee_log_writer;
+pub mod bee_supervisor;
 pub mod config;
 pub mod durability;
 pub mod feed_probe;
