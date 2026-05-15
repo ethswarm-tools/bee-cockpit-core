@@ -17,6 +17,7 @@ color-eyre = "0.6.3"
 directories = "5.0.1"
 futures = "0.3.31"
 libc = "0.2.161"
+notify-rust = { version = "4", default-features = false, features = ["z"] }
 num-bigint = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 serde = { version = "1.0.211", features = ["derive"] }
