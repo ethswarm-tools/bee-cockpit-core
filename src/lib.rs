@@ -14,6 +14,7 @@
 //! [`beegui`]: https://github.com/ethswarm-tools/beegui
 
 // Phase 1 — pure leaves extracted from bee-tui (no crate-internal deps).
+pub mod alerts;
 pub mod bee_log_discover;
 pub mod config_doctor;
 pub mod economics_oracle;
@@ -38,8 +39,11 @@ pub mod feed_probe;
 pub mod feed_timeline;
 pub mod fleet;
 pub mod manifest_walker;
+pub mod metrics;
+pub mod metrics_server;
 pub mod notifications;
 pub mod pubsub;
+pub mod stamp_preview;
 pub mod stamps;
 pub mod uploads;
 
