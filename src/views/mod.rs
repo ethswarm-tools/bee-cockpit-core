@@ -11,6 +11,8 @@
 //! onto the screen. No `Component` impls, no `Frame`, no `Style`,
 //! no `Color`.
 
+pub mod api_health;
+pub mod manifest;
 pub mod tags;
 pub mod warmup;
 pub mod watchlist;
