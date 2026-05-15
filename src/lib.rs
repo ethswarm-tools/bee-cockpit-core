@@ -13,4 +13,12 @@
 //! [`bee-tui`]: https://crates.io/crates/bee-tui
 //! [`beegui`]: https://github.com/ethswarm-tools/beegui
 
-// Modules will land here as they're extracted from bee-tui — see PLAN.md.
+// Phase 1 — pure leaves extracted from bee-tui (no crate-internal deps).
+pub mod bee_log_discover;
+pub mod config_doctor;
+pub mod economics_oracle;
+pub mod log_capture;
+pub mod pprof_bundle;
+pub mod state;
+pub mod utility_verbs;
+pub mod version_check;
