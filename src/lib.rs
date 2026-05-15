@@ -22,3 +22,13 @@ pub mod pprof_bundle;
 pub mod state;
 pub mod utility_verbs;
 pub mod version_check;
+
+// Phase 2 — data backbone. `config` here holds just the items the
+// data layer needs (NodeConfig + helpers); the rest of bee-tui's
+// config schema (KeyBindings, Styles, the section structs) follows
+// in a later phase.
+pub mod api;
+pub mod config;
+pub mod fleet;
+pub mod stamps;
+pub mod watch;
