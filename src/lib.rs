@@ -33,6 +33,7 @@ pub mod durability;
 pub mod feed_probe;
 pub mod feed_timeline;
 pub mod fleet;
+pub mod manifest_walker;
 pub mod pubsub;
 pub mod stamps;
 pub mod uploads;
