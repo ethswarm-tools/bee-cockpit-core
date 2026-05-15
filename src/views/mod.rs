@@ -12,6 +12,7 @@
 //! no `Color`.
 
 pub mod api_health;
+pub mod fleet;
 pub mod health;
 pub mod manifest;
 pub mod tags;
