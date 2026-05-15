@@ -26,5 +26,9 @@ toml = "0.8"
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter", "serde"] }
 
+[dev-dependencies]
+pretty_assertions = "1.4.1"
+tempfile = "3.10"
+
 [lib]
 path = "src/lib.rs"

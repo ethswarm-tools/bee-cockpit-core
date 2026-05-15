@@ -29,6 +29,11 @@ pub mod version_check;
 // in a later phase.
 pub mod api;
 pub mod config;
+pub mod durability;
+pub mod feed_probe;
+pub mod feed_timeline;
 pub mod fleet;
+pub mod pubsub;
 pub mod stamps;
+pub mod uploads;
 pub mod watch;
