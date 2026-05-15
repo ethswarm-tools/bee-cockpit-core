@@ -1,0 +1,18 @@
+[package]
+name = "bee-cockpit-core"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Shared cockpit logic for bee-tui and beegui — Bee API client wrappers, polling hub, snapshot types, and pure view computations. Renderer-agnostic."
+authors = ["Calin Martinconi <martinconic@gmail.com>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ethswarm-tools/bee-cockpit-core"
+readme = "README.md"
+keywords = ["swarm", "bee", "ethereum", "cockpit"]
+categories = ["api-bindings"]
+
+[dependencies]
+bee-rs = "1.6"
+
+[lib]
+path = "src/lib.rs"
