@@ -4,12 +4,21 @@
 //! thresholds + the far-bin relaxation), the flattened peer-table
 //! row builder, the saturation summary rollup, and the per-peer
 //! drill view computation (PLUR formatting, reserve-state
-//! formatting, the >5% batch-commitment outlier rule that mirrors
-//! bee-scripts/bad-status.sh). The renderer owns the drill-pane
-//! fetch channels and the ratatui draw path.
+//! formatting, the >5% batch-commitment relative-deviation rule, and
+//! the `/blocklist` panel). The renderer owns the drill-pane fetch
+//! channels and the ratatui draw path.
+//!
+//! Note on the batch-commitment rule: it is our own self-calibrating
+//! heuristic — flag any peer whose commitment deviates >5% from our
+//! local node's. It is *loosely inspired by* `bee-scripts/bad-status.sh`
+//! but deliberately not identical: that script flags an absolute
+//! `batchCommitment` constant (a value baked in per network epoch),
+//! plus `storageRadius != 10` or `neighborhoodSize < 1`. A fixed
+//! constant goes stale across epochs, so we compare against the live
+//! local view instead.
 
 use bee::debug::{
-    Balance, BinInfo, PeerCheques, PeerInfo, PeerStatus, Settlement, Status, Topology,
+    Balance, BinInfo, Peer, PeerCheques, PeerInfo, PeerStatus, Settlement, Status, Topology,
 };
 use num_bigint::BigInt;
 
@@ -70,6 +79,15 @@ pub struct PeerRow {
     pub reachability: String,
 }
 
+/// One row of the blocklist panel — a peer this node has currently
+/// blocklisted (`GET /blocklist`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlocklistRow {
+    pub peer_short: String,
+    pub peer_full: String,
+    pub full_node: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct SaturationSummary {
     pub starving: usize,
@@ -96,6 +114,11 @@ pub struct PeersView {
     pub network_availability: String,
     pub light_connected: u64,
     pub saturation: SaturationSummary,
+    /// Peers this node has blocklisted (`GET /blocklist`), sorted by
+    /// overlay. Empty when the blocklist is empty or its fetch failed
+    /// (the blocklist panel is secondary — its failure must not blank
+    /// the rest of the Peers screen).
+    pub blocklist: Vec<BlocklistRow>,
 }
 
 /// Per-field outcome of a peer drill fetch.
@@ -125,7 +148,9 @@ pub struct PeerDrillView {
 pub struct BatchCommitmentCell {
     /// Pre-formatted with thousands grouping (`"99 715 645 440"`).
     pub formatted: String,
-    /// True when |peer - local| / local > 5% (bee-scripts parity).
+    /// True when |peer - local| / local > 5% — a relative-deviation
+    /// heuristic against our own local commitment (see module docs;
+    /// not the absolute-constant check `bee-scripts/bad-status.sh` uses).
     pub outlier: bool,
 }
 
@@ -157,7 +182,23 @@ pub fn view_for(snap: &TopologySnapshot) -> Option<PeersView> {
         network_availability: t.network_availability.clone(),
         light_connected: t.light_nodes.connected,
         saturation,
+        blocklist: blocklist_rows(&snap.blocklist),
     })
+}
+
+/// Build the blocklist panel rows from the snapshot's `/blocklist`
+/// result, sorted by overlay for stable display.
+pub fn blocklist_rows(blocklist: &[Peer]) -> Vec<BlocklistRow> {
+    let mut out: Vec<BlocklistRow> = blocklist
+        .iter()
+        .map(|p| BlocklistRow {
+            peer_short: short_overlay(&p.address),
+            peer_full: p.address.trim_start_matches("0x").to_string(),
+            full_node: p.full_node,
+        })
+        .collect();
+    out.sort_by(|a, b| a.peer_full.cmp(&b.peer_full));
+    out
 }
 
 /// Pure compute path for the per-peer drill pane.
@@ -355,7 +396,8 @@ fn format_opt_plur(plur: Option<&BigInt>) -> String {
 }
 
 /// Compute the four reserve-state cells. Outlier rule for
-/// `batch_commitment`: |peer - local| / local > 5%.
+/// `batch_commitment`: flag when it deviates >5% from our local
+/// node's commitment (relative-deviation heuristic; see module docs).
 fn compute_reserve_state_fields(
     peer: &std::result::Result<Option<PeerStatus>, String>,
     local: &std::result::Result<Status, String>,
@@ -420,4 +462,37 @@ pub fn format_thousands(n: i64) -> String {
         out.push(ch);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn blocklist_rows_sorted_and_shortened() {
+        let bl = vec![
+            Peer {
+                address: "0xfffffffffffffffff".into(),
+                full_node: true,
+            },
+            Peer {
+                address: "0x000000000000aaaa".into(),
+                full_node: false,
+            },
+        ];
+        let rows = blocklist_rows(&bl);
+        assert_eq!(rows.len(), 2);
+        // sorted ascending by full overlay (0x stripped)
+        assert!(rows[0].peer_full.starts_with("0000"));
+        assert!(!rows[0].full_node);
+        assert!(rows[1].peer_full.starts_with("ffff"));
+        assert!(rows[1].full_node);
+        // long overlays are ellipsized for the short column
+        assert!(rows[0].peer_short.contains('…'));
+    }
+
+    #[test]
+    fn blocklist_rows_empty_is_empty() {
+        assert!(blocklist_rows(&[]).is_empty());
+    }
 }

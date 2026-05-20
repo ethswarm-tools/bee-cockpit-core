@@ -1,6 +1,6 @@
 [package]
 name = "bee-cockpit-core"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Shared cockpit logic for bee-tui and beegui — Bee API client wrappers, polling hub, snapshot types, and pure view computations. Renderer-agnostic."
@@ -29,6 +29,16 @@ tokio-util = "0.7.12"
 toml = "0.8"
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter", "serde"] }
+# Optional: the network/neighborhood census (T8) talks to the Swarmscan
+# indexer, not a Bee node. Off by default so the cockpit stays
+# pure-Bee-API unless an operator opts in.
+swarmscan-rs = { version = "0.1", path = "../swarmscan-rs", optional = true }
+
+[features]
+default = []
+# Enables the `network_census` module (Swarmscan-backed neighborhood
+# population). Pulls in the swarmscan-rs client.
+swarmscan = ["dep:swarmscan-rs"]
 
 [dev-dependencies]
 pretty_assertions = "1.4.1"

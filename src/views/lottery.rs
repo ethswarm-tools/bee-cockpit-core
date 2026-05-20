@@ -123,11 +123,45 @@ pub struct StakeCard {
     pub why: Option<String>,
 }
 
+/// Derived redistribution economics. Computed from the raw
+/// `/redistributionstate` `reward`/`fees` and `/stake` — the screen
+/// previously echoed those raw values without telling the operator
+/// whether they were actually net-positive. This is a single
+/// snapshot, so the figures are cumulative-to-date (Bee resets the
+/// reward/fees accumulators on withdrawal), not per-round rates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EconomicsCard {
+    /// `reward − fees`, formatted `±BZZ x.xxxx` (or `—` if either is
+    /// unknown). The bottom line: is playing the lottery paying off.
+    pub net_reward: String,
+    /// `(reward − fees) / staked` as a signed percent, e.g. `+3.42%`.
+    /// `None` when stake is zero/unknown or reward/fees are missing.
+    pub roi_pct: Option<String>,
+    /// Rounds since the node last won (`round − last_won_round`), or
+    /// `None` if it has never won / the data isn't loaded.
+    pub rounds_since_win: Option<u64>,
+    /// True when `reward − fees < 0` (fees have exceeded reward to
+    /// date) — the renderer colours the net-reward cell red.
+    pub net_negative: bool,
+}
+
+impl Default for EconomicsCard {
+    fn default() -> Self {
+        Self {
+            net_reward: "—".into(),
+            roi_pct: None,
+            rounds_since_win: None,
+            net_negative: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LotteryView {
     pub round: Option<RoundCard>,
     pub anchors: Vec<AnchorRow>,
     pub stake: StakeCard,
+    pub economics: EconomicsCard,
 }
 
 /// Pure, snapshot-driven view computation.
@@ -139,10 +173,12 @@ pub fn view_for(health: &HealthSnapshot, lottery: &LotterySnapshot) -> LotteryVi
         .map(anchor_rows_for)
         .unwrap_or_default();
     let stake = stake_card_for(health.redistribution.as_ref(), lottery);
+    let economics = economics_card_for(health.redistribution.as_ref(), lottery);
     LotteryView {
         round,
         anchors,
         stake,
+        economics,
     }
 }
 
@@ -337,6 +373,66 @@ fn stake_card_for(r: Option<&RedistributionState>, lottery: &LotterySnapshot) ->
     }
 }
 
+fn economics_card_for(
+    r: Option<&RedistributionState>,
+    lottery: &LotterySnapshot,
+) -> EconomicsCard {
+    let Some(r) = r else {
+        return EconomicsCard::default();
+    };
+    let rounds_since_win = rounds_since_win(r);
+    let (Some(reward), Some(fees)) = (r.reward.as_ref(), r.fees.as_ref()) else {
+        // No reward/fees yet — still surface the win cadence.
+        return EconomicsCard {
+            rounds_since_win,
+            ..EconomicsCard::default()
+        };
+    };
+    let net = reward - fees;
+    let net_negative = net < BigInt::from(0);
+    EconomicsCard {
+        net_reward: format_plur_signed_bzz(&net),
+        roi_pct: lottery.staked.as_ref().and_then(|s| roi_percent(&net, s)),
+        rounds_since_win,
+        net_negative,
+    }
+}
+
+fn rounds_since_win(r: &RedistributionState) -> Option<u64> {
+    if r.last_won_round == 0 || r.last_won_round > r.round {
+        None
+    } else {
+        Some(r.round - r.last_won_round)
+    }
+}
+
+/// `net / staked` as a signed percent string with two decimals, via
+/// integer basis-point math (no float / no extra deps). `None` when
+/// staked is non-positive or the basis points overflow `i64`.
+fn roi_percent(net: &BigInt, staked: &BigInt) -> Option<String> {
+    if staked <= &BigInt::from(0) {
+        return None;
+    }
+    let bp = (net * BigInt::from(10000)) / staked; // truncates toward zero
+    let bp_i: i64 = bp.to_string().parse().ok()?;
+    let sign = if bp_i < 0 { "-" } else { "+" };
+    let abs = bp_i.unsigned_abs();
+    Some(format!("{sign}{}.{:02}%", abs / 100, abs % 100))
+}
+
+/// Signed BZZ formatter for a PLUR amount (1 BZZ = 1e16 PLUR), four
+/// decimal places, always prefixed `+`/`-`.
+fn format_plur_signed_bzz(plur: &BigInt) -> String {
+    let zero = BigInt::from(0);
+    let neg = plur < &zero;
+    let abs = if neg { -plur.clone() } else { plur.clone() };
+    let scale = BigInt::from(10u64).pow(16);
+    let whole = &abs / &scale;
+    let frac_4 = (&abs % &scale) / BigInt::from(10u64).pow(12);
+    let sign = if neg { "-" } else { "+" };
+    format!("{sign}BZZ {whole}.{frac_4:0>4}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -429,5 +525,50 @@ mod tests {
             ..HealthSnapshot::default()
         };
         assert_eq!(bench_depth(&snap), 12);
+    }
+
+    fn bzz(n: i64) -> BigInt {
+        BigInt::from(n) * BigInt::from(10u64).pow(16)
+    }
+
+    #[test]
+    fn economics_net_reward_and_roi() {
+        // reward 5 BZZ, fees 1 BZZ → net +4 BZZ; staked 100 → ROI +4.00%.
+        let r = RedistributionState {
+            reward: Some(bzz(5)),
+            fees: Some(bzz(1)),
+            round: 100,
+            last_won_round: 90,
+            ..RedistributionState::default()
+        };
+        let lottery = LotterySnapshot {
+            staked: Some(bzz(100)),
+            ..LotterySnapshot::default()
+        };
+        let e = economics_card_for(Some(&r), &lottery);
+        assert_eq!(e.net_reward, "+BZZ 4.0000");
+        assert_eq!(e.roi_pct.as_deref(), Some("+4.00%"));
+        assert_eq!(e.rounds_since_win, Some(10));
+        assert!(!e.net_negative);
+    }
+
+    #[test]
+    fn economics_net_negative_when_fees_exceed_reward() {
+        let r = RedistributionState {
+            reward: Some(bzz(1)),
+            fees: Some(bzz(3)),
+            ..RedistributionState::default()
+        };
+        let e = economics_card_for(Some(&r), &LotterySnapshot::default());
+        assert_eq!(e.net_reward, "-BZZ 2.0000");
+        assert!(e.net_negative);
+        assert_eq!(e.roi_pct, None); // no stake loaded
+        assert_eq!(e.rounds_since_win, None); // last_won_round == 0
+    }
+
+    #[test]
+    fn economics_none_without_redistribution() {
+        let e = economics_card_for(None, &LotterySnapshot::default());
+        assert_eq!(e, EconomicsCard::default());
     }
 }

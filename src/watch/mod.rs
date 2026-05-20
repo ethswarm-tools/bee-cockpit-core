@@ -20,8 +20,8 @@ use std::time::{Duration, Instant};
 
 use bee::api::Tag;
 use bee::debug::{
-    Addresses, ChainState, ChequebookBalance, LastCheque, RedistributionState, Settlements, Status,
-    Topology, TransactionInfo, Wallet,
+    Addresses, ChainState, ChequebookBalance, LastCheque, Peer, RedistributionState, Settlements,
+    Status, Topology, TransactionInfo, Wallet,
 };
 use bee::postage::PostageBatch;
 use bee::swarm::Reference;
@@ -184,6 +184,12 @@ impl NetworkSnapshot {
 #[derive(Clone, Debug, Default)]
 pub struct TopologySnapshot {
     pub topology: Option<Topology>,
+    /// Peers currently blocklisted by this node (`GET /blocklist`).
+    /// Folded into this snapshot rather than a separate poller —
+    /// it's part of the same slow-changing connectivity picture the
+    /// S6 Peers screen renders. A blocklist-fetch failure is
+    /// non-fatal: the field stays empty and `last_error` is untouched.
+    pub blocklist: Vec<Peer>,
     pub last_error: Option<String>,
     pub last_update: Option<Instant>,
 }
@@ -654,14 +660,20 @@ fn spawn_topology_poller(
 }
 
 async fn collect_topology(client: &ApiClient) -> TopologySnapshot {
-    match client.bee().debug().topology().await {
+    let bee = client.bee();
+    // Blocklist failure is non-fatal — the panel is secondary, so an
+    // error here must not blank the rest of the Peers screen.
+    let blocklist = bee.debug().blocklist().await.unwrap_or_default();
+    match bee.debug().topology().await {
         Ok(topology) => TopologySnapshot {
             topology: Some(topology),
+            blocklist,
             last_error: None,
             last_update: Some(Instant::now()),
         },
         Err(e) => TopologySnapshot {
             topology: None,
+            blocklist,
             last_error: Some(format!("topology: {e}")),
             last_update: Some(Instant::now()),
         },

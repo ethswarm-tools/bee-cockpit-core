@@ -19,8 +19,11 @@ pub mod bee_log_discover;
 pub mod config_doctor;
 pub mod economics_oracle;
 pub mod log_capture;
+#[cfg(feature = "swarmscan")]
+pub mod network_census;
 pub mod pprof_bundle;
 pub mod state;
+pub mod support_bundle;
 pub mod utility_verbs;
 pub mod version_check;
 
